@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 
-	"Feedback/db"     // Importing our new DB package
-	"Feedback/models" // Importing our new Models package
+	"Feedback/db"
+	"Feedback/models"
 
+	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/crypto/bcrypt"
@@ -15,16 +15,13 @@ import (
 
 // --- AUTH HANDLERS ---
 
-func RegisterHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-	if r.Method != "POST" {
-		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+func RegisterHandler(c *gin.Context) {
+	var user models.User
+	// Gin automatically reads the body and fills the struct
+	if err := c.ShouldBindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
-
-	var user models.User
-	_ = json.NewDecoder(r.Body).Decode(&user)
 
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	user.Password = string(hashedPassword)
@@ -33,42 +30,39 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	collection := db.Database.Collection("users")
 	_, err := collection.InsertOne(context.TODO(), user)
 	if err != nil {
-		http.Error(w, "Error saving user", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error saving user"})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "Admin Registered Successfully!"})
+	c.JSON(http.StatusOK, gin.H{"status": "Admin Registered Successfully!"})
 }
 
-func LoginHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-	if r.Method != "POST" { return }
-
+func LoginHandler(c *gin.Context) {
 	var loginDetails struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&loginDetails)
+	if err := c.ShouldBindJSON(&loginDetails); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
 
 	var user models.User
 	collection := db.Database.Collection("users")
 	err := collection.FindOne(context.TODO(), bson.M{"email": loginDetails.Email}).Decode(&user)
-	
+
 	if err != nil {
-		http.Error(w, "User not found", http.StatusUnauthorized)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
 		return
 	}
 
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(loginDetails.Password))
 	if err != nil {
-		http.Error(w, "Wrong password!", http.StatusUnauthorized)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Wrong password!"})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	c.JSON(http.StatusOK, gin.H{
 		"status": "Login Successful!",
 		"name":   user.Name,
 		"id":     user.ID.Hex(),
@@ -77,35 +71,45 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 // --- SESSION HANDLERS ---
 
-func CreateSessionHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-	if r.Method != "POST" { return }
-
+func CreateSessionHandler(c *gin.Context) {
 	var newSession models.Session
-	_ = json.NewDecoder(r.Body).Decode(&newSession)
+	if err := c.ShouldBindJSON(&newSession); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
 	newSession.ID = primitive.NewObjectID()
 
-	collection := db.Database.Collection("sessions")
-	collection.InsertOne(context.TODO(), newSession)
+	if newSession.Title == "" || newSession.Content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Title and Content are required"})
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(newSession)
+	collection := db.Database.Collection("sessions")
+	_, err := collection.InsertOne(context.TODO(), newSession)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		return
+	}
+
+	c.JSON(http.StatusOK, newSession)
 }
 
-func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-
+func GetSessionsHandler(c *gin.Context) {
 	collection := db.Database.Collection("sessions")
-	
-	creatorID := r.URL.Query().Get("creator_id")
-	sessionID := r.URL.Query().Get("id")
+
+	// Get query parameters easily with Gin
+	creatorID := c.Query("creator_id")
+	sessionID := c.Query("id")
 
 	var filter interface{}
 
 	if sessionID != "" {
-		objID, _ := primitive.ObjectIDFromHex(sessionID)
+		objID, err := primitive.ObjectIDFromHex(sessionID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Session ID"})
+			return
+		}
 		filter = bson.M{"_id": objID}
 	} else if creatorID != "" {
 		filter = bson.M{"creator_id": creatorID}
@@ -113,7 +117,12 @@ func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		filter = bson.M{}
 	}
 
-	cursor, _ := collection.Find(context.TODO(), filter)
+	cursor, err := collection.Find(context.TODO(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching sessions"})
+		return
+	}
+
 	var sessions []models.Session
 	cursor.All(context.TODO(), &sessions)
 
@@ -121,57 +130,74 @@ func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		sessions = []models.Session{}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sessions)
+	c.JSON(http.StatusOK, sessions)
 }
 
-func DeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-	
-	sessionID := r.URL.Query().Get("id")
-	objID, _ := primitive.ObjectIDFromHex(sessionID)
+func DeleteSessionHandler(c *gin.Context) {
+	sessionID := c.Query("id")
+	if sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Session ID required"})
+		return
+	}
 
-	db.Database.Collection("sessions").DeleteOne(context.TODO(), bson.M{"_id": objID})
-	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "Deleted"})
+	objID, err := primitive.ObjectIDFromHex(sessionID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Session ID"})
+		return
+	}
+
+	result, err := db.Database.Collection("sessions").DeleteOne(context.TODO(), bson.M{"_id": objID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting session"})
+		return
+	}
+
+	if result.DeletedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+		return
+	}
+
+	// Delete related feedback
+	db.Database.Collection("feedback").DeleteMany(context.TODO(), bson.M{"session_id": sessionID})
+
+	c.JSON(http.StatusOK, gin.H{"status": "Deleted successfully"})
 }
 
 // --- FEEDBACK HANDLERS ---
 
-func SubmitFeedbackHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-	if r.Method != "POST" { return }
-
+func SubmitFeedbackHandler(c *gin.Context) {
 	var newFeedback models.Feedback
-	_ = json.NewDecoder(r.Body).Decode(&newFeedback)
+	if err := c.ShouldBindJSON(&newFeedback); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
 
-	db.Database.Collection("feedback").InsertOne(context.TODO(), newFeedback)
+	collection := db.Database.Collection("feedback")
+	_, err := collection.InsertOne(context.TODO(), newFeedback)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit feedback"})
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "Feedback Received!"})
+	c.JSON(http.StatusOK, gin.H{"status": "Feedback Received!"})
 }
 
-func ViewFeedbackHandler(w http.ResponseWriter, r *http.Request) {
-	EnableCors(&w)
-	if r.Method == "OPTIONS" { return }
-
-	sessionID := r.URL.Query().Get("session_id")
+func ViewFeedbackHandler(c *gin.Context) {
+	sessionID := c.Query("session_id")
 	collection := db.Database.Collection("feedback")
-	
-	cursor, _ := collection.Find(context.TODO(), bson.M{"session_id": sessionID})
+
+	cursor, err := collection.Find(context.TODO(), bson.M{"session_id": sessionID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching feedback"})
+		return
+	}
+
 	var feedbacks []models.Feedback
 	cursor.All(context.TODO(), &feedbacks)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(feedbacks)
-}
+	if feedbacks == nil {
+		feedbacks = []models.Feedback{}
+	}
 
-// Helper: Enable CORS
-func EnableCors(w *http.ResponseWriter) {
-	(*w).Header().Set("Access-Control-Allow-Origin", "*")
-	(*w).Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-	(*w).Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+	c.JSON(http.StatusOK, feedbacks)
 }
