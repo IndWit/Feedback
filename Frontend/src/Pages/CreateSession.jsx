@@ -14,7 +14,7 @@ const CreateSessionPage = ({ onNavigate }) => {
   const [description, setDescription] = useState('');
 
   const handleCreateSession = async () => {
-    // 1. Validation
+    // 1. Validation 123
     if (!title || !description) {
       alert("Please fill in all fields");
       return;
